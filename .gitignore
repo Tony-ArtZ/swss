@@ -1,0 +1,35 @@
+# Object files
+*.o
+
+# Libraries
+*.lib
+*.so
+*.so.*
+*.a
+
+# Executables
+*.exe
+*.out
+chat_server
+
+# Build directory
+build/
+
+# IDE specific files
+.vscode/
+.idea/
+
+# OS specific files
+.DS_Store
+.directory
+.Trash-*
+
+# Debug files
+*.dSYM/
+
+# Dependency files
+*.d
+
+# Backup files
+*~
+*.bak
