@@ -147,11 +147,16 @@ int read_frame(int sock_fd)
     while (1)
     {
         u_int8_t buf[2];
-        recv_result = recv(sock_fd, buf, 2, 0);
-        if (recv_result <= 0)
+        u_int64_t received_len = 0;
+        while (received_len != 2)
         {
-            free(final_payload);
-            return -1;
+            recv_result = recv(sock_fd, buf + received_len, 2 - received_len, 0);
+            if (recv_result <= 0)
+            {
+                free(final_payload);
+                return -1;
+            }
+            received_len += recv_result;
         }
 
         u_int8_t fin = (buf[0] & 0x80) >> 7;
@@ -182,11 +187,9 @@ int read_frame(int sock_fd)
             break;
         case 0x9:
             printf("Ping Frame\n");
-            ws_send_response(sock_fd, 0xA, NULL, 0, 0);
             break;
         case 0xA:
             printf("Pong Frame\n");
-            ws_send_response(sock_fd, 0xA, NULL, 0, 0);
             break;
         }
 
@@ -196,13 +199,23 @@ int read_frame(int sock_fd)
 
         printf("Payload Length: %lu\n", payload_len);
 
+        if (opcode >= 0x9 && payload_len > 125)
+        {
+            printf("Invalid Ping / Pong\n");
+            return -1;
+        }
         if (payload_len == 126)
         {
-            recv_result = recv(sock_fd, &payload_len, 2, 0);
-            if (recv_result <= 0)
+            u_int64_t received_len = 0;
+            while (received_len != 2)
             {
-                free(final_payload);
-                return -1;
+                recv_result = recv(sock_fd, ((char *)&payload_len) + received_len, 2 - received_len, 0);
+                if (recv_result <= 0)
+                {
+                    free(final_payload);
+                    return -1;
+                }
+                received_len += recv_result;
             }
             payload_len = be64toh(payload_len);
             payload_len = payload_len >> (6*8);
@@ -210,11 +223,16 @@ int read_frame(int sock_fd)
         }
         else if (payload_len == 127)
         {
-            recv_result = recv(sock_fd, &payload_len, 8, 0);
-            if (recv_result <= 0)
+            u_int64_t received_len = 0;
+            while (received_len != 8)
             {
-                free(final_payload);
-                return -1;
+                recv_result = recv(sock_fd, ((char *)&payload_len) + received_len, 8 - received_len, 0);
+                if (recv_result <= 0)
+                {
+                    free(final_payload);
+                    return -1;
+                }
+                received_len += recv_result;
             }
             payload_len = be64toh(payload_len);
             printf("8-Extended Payload Length: %lu\n", payload_len);
@@ -223,11 +241,16 @@ int read_frame(int sock_fd)
         u_int8_t mask_key[4];
         if (mask == 1)
         {
-            recv_result = recv(sock_fd, mask_key, 4, 0);
-            if (recv_result <= 0)
+            u_int64_t received_len = 0;
+            while (received_len != 4)
             {
-                free(final_payload);
-                return -1;
+                recv_result = recv(sock_fd, mask_key + received_len, 4 - received_len, 0);
+                if (recv_result <= 0)
+                {
+                    free(final_payload);
+                    return -1;
+                }
+                received_len += recv_result;
             }
             printf("Mask Key: %d %d %d %d\n", mask_key[0], mask_key[1], mask_key[2],
                    mask_key[3]);
@@ -281,6 +304,28 @@ int read_frame(int sock_fd)
         {
             break;
         }
+    }
+
+    switch (opcode)
+    {
+    case 0x1:
+    case 0x2:
+        break;
+        break;
+    case 0x9:
+        ws_send_response(
+            sock_fd,
+            0xA,
+            (total_payload_len > 0 && final_payload != NULL) ? final_payload : NULL,
+            (total_payload_len > 0) ? total_payload_len : 0,
+        0);
+        free(final_payload);
+        return 1;
+        break;
+    case 0xA:
+        free(final_payload);
+        return 1;
+        break;
     }
 
     static const char empty = '\0';
