@@ -19,7 +19,7 @@
 typedef struct
 {
     void (*on_open)(int client_fd);
-    void (*on_message)(int client_fd, const char *message, size_t length);
+    void (*on_message)(int client_fd, int text, const char *message, size_t length);
     void (*on_close)(int client_fd);
     void (*on_error)(int client_fd, int error_code);
 } ws_callbacks_t;

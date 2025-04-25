@@ -139,6 +139,7 @@ int read_frame(int sock_fd)
     }
 
     printf("\nReading frame\n");
+    u_int8_t opcode;
     u_int8_t *final_payload = NULL;
     u_int64_t total_payload_len = 0;
     ssize_t recv_result;
@@ -155,7 +156,7 @@ int read_frame(int sock_fd)
 
         u_int8_t fin = (buf[0] & 0x80) >> 7;
         u_int8_t rsv = buf[0] & 0x70;
-        u_int8_t opcode = buf[0] & 0x0F;
+        opcode = buf[0] & 0x0F;
 
         printf("FIN: %d\n", fin);
 
@@ -285,6 +286,7 @@ int read_frame(int sock_fd)
     static const char empty = '\0';
     g_callbacks->on_message(
         sock_fd,
+        (opcode == 0x1) ? 1 : 0,
         (total_payload_len > 0 && final_payload != NULL) ? (const char *)final_payload : &empty,
         (total_payload_len > 0) ? total_payload_len : 0
     );
