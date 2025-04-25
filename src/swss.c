@@ -53,7 +53,7 @@ int ws_send_response(int client_fd, u_int8_t opcode, u_int8_t *payload,
     {
         payload_len_specifier = payload_len;
     }
-    else if (payload_len <= 65536)
+    else if (payload_len < 65536)
     {
         payload_len_specifier = 126;
         frame_header_size += 2;
@@ -138,7 +138,7 @@ int read_frame(int sock_fd)
         return -1;
     }
 
-    printf("Reading frame\n");
+    printf("\nReading frame\n");
     u_int8_t *final_payload = NULL;
     u_int64_t total_payload_len = 0;
     ssize_t recv_result;
@@ -162,13 +162,6 @@ int read_frame(int sock_fd)
         u_int8_t mask = (buf[1] & 0x80) >> 7;
         printf("Mask: %d\n", mask);
 
-        if (mask != 1)
-        {
-            printf("Mask bit not set\n");
-            free(final_payload);
-            return -1;
-        }
-
         switch (opcode)
         {
         case 0x0:
@@ -182,8 +175,9 @@ int read_frame(int sock_fd)
             printf("Binary Frame\n");
             break;
         case 0x8:
-            // Close Frame
-            return 1;
+            printf("Close Frame\n");
+            ws_send_response(sock_fd, 0x8, NULL, 0, 0);
+            return -1;
             break;
         case 0x9:
             printf("Ping Frame\n");
@@ -203,27 +197,26 @@ int read_frame(int sock_fd)
 
         if (payload_len == 126)
         {
-            recv_result = recv(sock_fd, buf, 2, 0);
+            recv_result = recv(sock_fd, &payload_len, 2, 0);
             if (recv_result <= 0)
             {
                 free(final_payload);
                 return -1;
             }
-            payload_len = (buf[0] << 8) | buf[1];
+            payload_len = be64toh(payload_len);
+            payload_len = payload_len >> (6*8);
+            printf("2-Extended Payload Length: %lu\n", payload_len);
         }
-
-        if (payload_len == 127)
+        else if (payload_len == 127)
         {
-            u_int64_t *buf8 = 0;
-            recv_result = recv(sock_fd, buf8, 8, 0);
+            recv_result = recv(sock_fd, &payload_len, 8, 0);
             if (recv_result <= 0)
             {
-                free(buf8);
                 free(final_payload);
                 return -1;
             }
-            payload_len = *buf8;
-            free(buf8);
+            payload_len = be64toh(payload_len);
+            printf("8-Extended Payload Length: %lu\n", payload_len);
         }
 
         u_int8_t mask_key[4];
@@ -248,12 +241,17 @@ int read_frame(int sock_fd)
                 return -1;
             }
 
-            recv_result = recv(sock_fd, payload, payload_len, 0);
-            if (recv_result <= 0)
+            u_int64_t received_len = 0;
+            while (received_len != payload_len)
             {
-                free(payload);
-                free(final_payload);
-                return -1;
+                recv_result = recv(sock_fd, payload + received_len, payload_len - received_len, 0);
+                if (recv_result <= 0)
+                {
+                    free(payload);
+                    free(final_payload);
+                    return -1;
+                }
+                received_len += recv_result;
             }
 
             if (mask == 1)
@@ -284,11 +282,13 @@ int read_frame(int sock_fd)
         }
     }
 
-    if (total_payload_len > 0 && final_payload != NULL)
-    {
-        g_callbacks->on_message(sock_fd, (const char *)final_payload, total_payload_len);
-        free(final_payload);
-    }
+    static const char empty = '\0';
+    g_callbacks->on_message(
+        sock_fd,
+        (total_payload_len > 0 && final_payload != NULL) ? (const char *)final_payload : &empty,
+        (total_payload_len > 0) ? total_payload_len : 0
+    );
+    free(final_payload);
 
     return 0;
 }
