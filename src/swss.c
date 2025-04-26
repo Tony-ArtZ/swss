@@ -3,7 +3,8 @@
 #include <endian.h>
 #include <sys/types.h>
 
-ws_callbacks_t *g_callbacks;
+static const char *protocol_error = "\x03\xea"; // 1002
+static ws_callbacks_t *g_callbacks;
 
 void ws_exit()
 {
@@ -131,6 +132,9 @@ int ws_send_response(int client_fd, u_int8_t opcode, u_int8_t *payload,
     return 0;
 }
 
+// reads one control frame (exit, ping, pong)
+// OR
+// reads one message frame, possibly interspersed with any number of control frames (if fragmented)
 int read_frame(int sock_fd)
 {
     if (sock_fd < 0)
@@ -139,10 +143,9 @@ int read_frame(int sock_fd)
     }
 
     printf("\nReading frame\n");
-    u_int8_t rsv;
-    u_int8_t opcode;
+    u_int8_t original_opcode = 0; // for fragmented messages
     u_int8_t *final_payload = NULL;
-    u_int64_t total_payload_len = 0;
+    u_int64_t final_payload_len = 0;
     ssize_t recv_result;
 
     while (1)
@@ -161,8 +164,8 @@ int read_frame(int sock_fd)
         }
 
         u_int8_t fin = (buf[0] & 0x80) >> 7;
-        rsv = buf[0] & 0x70;
-        opcode = buf[0] & 0x0F;
+        u_int8_t rsv = buf[0] & 0x70;
+        u_int8_t opcode = buf[0] & 0x0F;
 
         printf("FIN: %d\n", fin);
 
@@ -174,7 +177,6 @@ int read_frame(int sock_fd)
         case 0x0:
             printf("Continuation Frame\n");
             break;
-
         case 0x1:
             printf("Text Frame\n");
             break;
@@ -183,8 +185,6 @@ int read_frame(int sock_fd)
             break;
         case 0x8:
             printf("Close Frame\n");
-            ws_send_response(sock_fd, 0x8, NULL, 0, 0);
-            return -1;
             break;
         case 0x9:
             printf("Ping Frame\n");
@@ -194,8 +194,6 @@ int read_frame(int sock_fd)
             break;
         }
 
-        printf("Opcode: %d\n", opcode);
-
         u_int64_t payload_len = buf[1] & 0x7F;
 
         printf("Payload Length: %lu\n", payload_len);
@@ -203,6 +201,7 @@ int read_frame(int sock_fd)
         if (opcode >= 0x9 && payload_len > 125)
         {
             printf("Invalid Ping / Pong\n");
+            free(final_payload);
             return -1;
         }
         if (payload_len == 126)
@@ -257,9 +256,10 @@ int read_frame(int sock_fd)
                    mask_key[3]);
         }
 
+        u_int8_t *payload = NULL;
         if (payload_len > 0)
         {
-            u_int8_t *payload = malloc(payload_len);
+            payload = malloc(payload_len);
             if (!payload)
             {
                 free(final_payload);
@@ -287,74 +287,129 @@ int read_frame(int sock_fd)
                 }
             }
 
-            u_int8_t *new_final_payload = realloc(final_payload, total_payload_len + payload_len);
-            if (!new_final_payload)
+            if (opcode <= 0x2)
             {
+                u_int8_t *new_final_payload = realloc(final_payload, final_payload_len + payload_len);
+                if (!new_final_payload)
+                {
+                    free(payload);
+                    free(final_payload);
+                    return -1;
+                }
+                final_payload = new_final_payload;
+
+                memcpy(final_payload + final_payload_len, payload, payload_len);
+                final_payload_len += payload_len;
+            }
+        }
+
+        // reserved / future (not supported) opcodes
+        if ((3 <= opcode && opcode <= 7) || opcode > 10)
+        {
+            ws_send_response(sock_fd, 0x8, protocol_error, 2, 0);
+            free(payload);
+            free(final_payload);
+            return -1;
+        }
+        // this does not support any protocol extensions
+        if (rsv != 0)
+        {
+            ws_send_response(sock_fd, 0x8, protocol_error, 2, 0);
+            free(payload);
+            free(final_payload);
+            return -1;
+        }
+
+        switch (opcode)
+        {
+        case 0x0:
+            if (original_opcode == 0)
+            {
+                // continuing, but never got a non-fin start?
+                ws_send_response(sock_fd, 0x8, protocol_error, 2, 0);
                 free(payload);
                 free(final_payload);
                 return -1;
             }
-            final_payload = new_final_payload;
-
-            memcpy(final_payload + total_payload_len, payload, payload_len);
-            total_payload_len += payload_len;
-            free(payload);
+            // fall through
+        case 0x1:
+        case 0x2:
+            if (opcode != 0)
+            {
+                if (original_opcode != 0)
+                {
+                    // tried to start a new message while a fragmented one was in-progress
+                    ws_send_response(sock_fd, 0x8, protocol_error, 2, 0);
+                    free(payload);
+                    free(final_payload);
+                    return -1;
+                }
+                original_opcode = opcode;
+            }
+            if (fin != 1)
+            {
+                free(payload);
+                continue;
+            }
+            break;
+        case 0x8:
+        case 0x9:
+        case 0xA:
+            if (fin != 1)
+            {
+                ws_send_response(sock_fd, 0x8, protocol_error, 2, 0);
+                free(payload);
+                free(final_payload);
+                return -1;
+            }
+            break;
         }
 
-        if (fin)
+        switch (opcode)
         {
+        case 0x0:
+            if (original_opcode == 0)
+            {
+                // finished a continue, but never got a non-fin start?
+                ws_send_response(sock_fd, 0x8, protocol_error, 2, 0);
+                free(payload);
+                free(final_payload);
+                return -1;
+            }
+            // fall through
+        case 0x1:
+        case 0x2:
+            g_callbacks->on_message(sock_fd, (original_opcode == 0x1) ? 1 : 0,
+                (final_payload_len > 0 && final_payload != NULL) ? (const char *)final_payload : "\0",
+                (final_payload_len > 0) ? final_payload_len : 0
+            );
+            free(payload);
+            free(final_payload);
+            return 1;
+            break;
+        case 0x8:
+            ws_send_response(sock_fd, 0x8, "\x03\xe8", 2, 0); // 1000
+            free(final_payload);
+            return -1;
+        case 0x9:
+            ws_send_response(sock_fd, 0xA,
+                (payload_len > 0 && payload != NULL) ? payload : NULL,
+                (payload_len > 0) ? payload_len : 0,
+            0);
+            // fall through
+        case 0xA:
+            free(payload);
+            if (original_opcode == 0)
+            {
+                free(final_payload);
+                return 1;
+            }
             break;
         }
     }
 
-    // reserved / future (not supported) opcodes
-    if ((3 <= opcode && opcode <= 7) || opcode > 10)
-    {
-        static const char *protocol_error = "\x03\xea";
-        ws_send_response(sock_fd, 0x8, protocol_error, 2, 0);
-        return -1;
-    }
-
-    // this does not support any protocol extensions
-    if (rsv != 0)
-    {
-        static const char *protocol_error = "\x03\xea";
-        ws_send_response(sock_fd, 0x8, protocol_error, 2, 0);
-        return -1;
-    }
-
-    switch (opcode)
-    {
-    case 0x1:
-    case 0x2:
-        break;
-        break;
-    case 0x9:
-        ws_send_response(
-            sock_fd,
-            0xA,
-            (total_payload_len > 0 && final_payload != NULL) ? final_payload : NULL,
-            (total_payload_len > 0) ? total_payload_len : 0,
-        0);
-        free(final_payload);
-        return 1;
-        break;
-    case 0xA:
-        free(final_payload);
-        return 1;
-        break;
-    }
-
-    static const char empty = '\0';
-    g_callbacks->on_message(
-        sock_fd,
-        (opcode == 0x1) ? 1 : 0,
-        (total_payload_len > 0 && final_payload != NULL) ? (const char *)final_payload : &empty,
-        (total_payload_len > 0) ? total_payload_len : 0
-    );
-    free(final_payload);
-
-    return 0;
+    // should never be hit, will have to explicitly return after a fin above
+    return 1;
 }
 
 void *handle_client(void *arg)
