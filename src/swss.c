@@ -139,6 +139,7 @@ int read_frame(int sock_fd)
     }
 
     printf("\nReading frame\n");
+    u_int8_t rsv;
     u_int8_t opcode;
     u_int8_t *final_payload = NULL;
     u_int64_t total_payload_len = 0;
@@ -160,7 +161,7 @@ int read_frame(int sock_fd)
         }
 
         u_int8_t fin = (buf[0] & 0x80) >> 7;
-        u_int8_t rsv = buf[0] & 0x70;
+        rsv = buf[0] & 0x70;
         opcode = buf[0] & 0x0F;
 
         printf("FIN: %d\n", fin);
@@ -304,6 +305,22 @@ int read_frame(int sock_fd)
         {
             break;
         }
+    }
+
+    // reserved / future (not supported) opcodes
+    if ((3 <= opcode && opcode <= 7) || opcode > 10)
+    {
+        static const char *protocol_error = "\x03\xea";
+        ws_send_response(sock_fd, 0x8, protocol_error, 2, 0);
+        return -1;
+    }
+
+    // this does not support any protocol extensions
+    if (rsv != 0)
+    {
+        static const char *protocol_error = "\x03\xea";
+        ws_send_response(sock_fd, 0x8, protocol_error, 2, 0);
+        return -1;
     }
 
     switch (opcode)
