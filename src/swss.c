@@ -198,9 +198,9 @@ int read_frame(int sock_fd)
 
         printf("Payload Length: %lu\n", payload_len);
 
-        if (opcode >= 0x9 && payload_len > 125)
+        if (opcode >= 0x8 && payload_len > 125)
         {
-            printf("Invalid Ping / Pong\n");
+            printf("Invalid Extended Payload Frame\n");
             free(final_payload);
             return -1;
         }
@@ -355,7 +355,7 @@ int read_frame(int sock_fd)
         case 0x8:
         case 0x9:
         case 0xA:
-            if (fin != 1)
+            if (fin != 1 || (opcode == 0x8 && payload_len == 1))
             {
                 ws_send_response(sock_fd, 0x8, protocol_error, 2, 0);
                 free(payload);
@@ -388,7 +388,28 @@ int read_frame(int sock_fd)
             return 1;
             break;
         case 0x8:
-            ws_send_response(sock_fd, 0x8, "\x03\xe8", 2, 0); // 1000
+            u_int16_t reason = 1000;
+            if(payload_len != 0 && payload != NULL)
+            {
+                reason = be16toh((((u_int16_t)payload[1]) << 8) | payload[0]);
+            }
+            switch (reason)
+            {
+            case 1000 ... 1003:
+            case 1007 ... 1011:
+            case 3000:
+            case 3999:
+            case 4000:
+            case 4999:
+                ws_send_response(sock_fd, 0x8,
+                    (payload_len != 0 && payload != NULL) ? (const char *)payload : "\x03\xe8", // 1000
+                2, 0);
+                break;
+            default:
+                ws_send_response(sock_fd, 0x8, protocol_error, 2, 0);
+                break;
+            }
+            free(payload);
             free(final_payload);
             return -1;
         case 0x9:
